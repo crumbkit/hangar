@@ -1,6 +1,6 @@
 //! The [`RecordStore`] contract suite.
 
-use super::{Clause, SeedRecord, Violation, ensure, fixture, seed, unexpected};
+use super::{Clause, RunTogether, SeedRecord, Violation, ensure, fixture, seed, unexpected};
 use crate::{
     BindingName, Blob, Principal, PrincipalId, ReadError, RecordBody, RecordPath, RecordStore,
     WriteError, WriteProvenance,
@@ -12,10 +12,14 @@ use crate::{
 pub struct RecordFixture {
     seeds: Vec<SeedRecord>,
     other_body: RecordBody,
+    third_body: RecordBody,
     missing: RecordPath,
     principal: Principal,
     binding: BindingName,
 }
+
+/// How many pairs of writes the concurrency clause runs.
+const WRITE_ROUNDS: usize = 8;
 
 impl RecordFixture {
     /// The standard fixture.
@@ -28,6 +32,7 @@ impl RecordFixture {
         Ok(Self {
             seeds: vec![seed("/tasks/a", "tasks/task/v2", "title: first\n")?],
             other_body: fixture(RecordBody::try_from("title: second\n"))?,
+            third_body: fixture(RecordBody::try_from("title: third\n"))?,
             missing: fixture(RecordPath::try_from("/tasks/missing"))?,
             principal: Principal::new(fixture(PrincipalId::try_from("contract-suite"))?),
             binding: fixture(BindingName::try_from("contract-view"))?,
@@ -178,6 +183,150 @@ pub async fn an_old_blob_conflicts_after_a_write<S: RecordStore>(
         Clause::AnOldBlobConflictsAfterAWrite,
         || format!("second write answered {answer:?}, record is now {after:?}"),
     )
+}
+
+/// A blob never repeats for one record. After the body goes from A to B and
+/// back to A, the record has a blob that is neither of its earlier blobs,
+/// and a write that names the first blob returns `Conflict`.
+///
+/// # Errors
+///
+/// Returns [`Clause::ABlobNeverRepeatsForOneRecord`] otherwise.
+pub async fn a_blob_never_repeats_for_one_record<S: RecordStore>(
+    store: &S,
+    contract_fixture: &RecordFixture,
+) -> Result<(), Violation> {
+    let seeded = contract_fixture.target()?;
+    let path = seeded.path();
+    let first = unexpected(store.read(path).await)?.blob().clone();
+    let second = unexpected(
+        store
+            .write(
+                path,
+                &contract_fixture.other_body,
+                &contract_fixture.write_based_on(first.clone()),
+            )
+            .await,
+    )?;
+    let third = unexpected(
+        store
+            .write(
+                path,
+                seeded.body(),
+                &contract_fixture.write_based_on(second.clone()),
+            )
+            .await,
+    )?;
+    let answer = store
+        .write(
+            path,
+            &contract_fixture.other_body,
+            &contract_fixture.write_based_on(first.clone()),
+        )
+        .await;
+    ensure(
+        third != first && third != second && answer == Err(WriteError::Conflict),
+        Clause::ABlobNeverRepeatsForOneRecord,
+        || {
+            format!(
+                "blobs {first:?}, {second:?} and {third:?}, a write from the first answered {answer:?}"
+            )
+        },
+    )
+}
+
+/// A write that a store rejects leaves the record unchanged. A write to an
+/// unknown path returns `NotFound` and a write from a stale blob returns
+/// `Conflict`, whatever the store would reject.
+///
+/// A store that never rejects passes the last part, because the suite has no
+/// body that a store must reject.
+///
+/// # Errors
+///
+/// Returns [`Clause::ARejectedWriteChangesNothing`] otherwise.
+pub async fn a_rejected_write_changes_nothing<S: RecordStore>(
+    store: &S,
+    contract_fixture: &RecordFixture,
+) -> Result<(), Violation> {
+    let clause = Clause::ARejectedWriteChangesNothing;
+    let path = contract_fixture.target()?.path();
+    let before = unexpected(store.read(path).await)?;
+    let unknown = store
+        .write(
+            &contract_fixture.missing,
+            &contract_fixture.other_body,
+            &contract_fixture.write_based_on(before.blob().clone()),
+        )
+        .await;
+    ensure(unknown == Err(WriteError::NotFound), clause, || {
+        format!("a write to an unknown path answered {unknown:?}")
+    })?;
+    let stale = store
+        .write(
+            path,
+            &contract_fixture.other_body,
+            &contract_fixture.write_based_on(unrelated_blob(before.blob())?),
+        )
+        .await;
+    ensure(stale == Err(WriteError::Conflict), clause, || {
+        format!("a write from a stale blob answered {stale:?}")
+    })?;
+    let answer = store
+        .write(
+            path,
+            &contract_fixture.other_body,
+            &contract_fixture.write_based_on(before.blob().clone()),
+        )
+        .await;
+    let after = unexpected(store.read(path).await)?;
+    ensure(
+        !matches!(answer, Err(WriteError::Rejected(_))) || after == before,
+        clause,
+        || format!("a rejected write left the record as {after:?}, it was {before:?}"),
+    )
+}
+
+/// Two writes from one blob that run together give one success and one
+/// `Conflict`, and the record keeps the body of the write that succeeded.
+/// The clause runs several pairs, each from the blob that the last pair left,
+/// and `runner` drives each pair.
+///
+/// # Errors
+///
+/// Returns [`Clause::ConcurrentWritesFromOneBlobGiveOneConflict`] otherwise.
+pub async fn concurrent_writes_from_one_blob_give_one_conflict<S: RecordStore>(
+    store: &S,
+    contract_fixture: &RecordFixture,
+    runner: &impl RunTogether,
+) -> Result<(), Violation> {
+    let clause = Clause::ConcurrentWritesFromOneBlobGiveOneConflict;
+    let path = contract_fixture.target()?.path();
+    for round in 0..WRITE_ROUNDS {
+        let before = unexpected(store.read(path).await)?;
+        let provenance = contract_fixture.write_based_on(before.blob().clone());
+        let (first_body, second_body) =
+            (&contract_fixture.other_body, &contract_fixture.third_body);
+        let answers = runner
+            .run_together(
+                || store.write(path, first_body, &provenance),
+                || store.write(path, second_body, &provenance),
+            )
+            .await;
+        let (first, second) = unexpected(answers.ok_or("a concurrent write panicked"))?;
+        let after = unexpected(store.read(path).await)?;
+        let winner = match (&first, &second) {
+            (Ok(blob), Err(WriteError::Conflict)) => Some((blob, first_body)),
+            (Err(WriteError::Conflict), Ok(blob)) => Some((blob, second_body)),
+            _ => None,
+        };
+        ensure(
+            winner.is_some_and(|(blob, body)| after.blob() == blob && after.body() == body),
+            clause,
+            || format!("round {round}: answers {first:?} and {second:?}, record {after:?}"),
+        )?;
+    }
+    Ok(())
 }
 
 /// A read or a write of an unknown path returns `NotFound`.

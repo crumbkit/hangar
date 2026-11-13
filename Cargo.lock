@@ -6,6 +6,7 @@ version = 4
 name = "hangar-core"
 version = "0.1.0"
 dependencies = [
+ "hangar-core",
  "secrecy",
  "thiserror",
 ]

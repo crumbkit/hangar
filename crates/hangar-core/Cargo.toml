@@ -11,5 +11,14 @@ rust-version.workspace = true
 secrecy.workspace = true
 thiserror.workspace = true
 
+[features]
+# Exposes helpers that only tests need, such as MemoryRecordStore::seed, which
+# replaces a record without checking its blob. The crate's own tests turn it
+# on through the dev-dependency below.
+testing = []
+
+[dev-dependencies]
+hangar-core = { path = ".", features = ["testing"] }
+
 [lints]
 workspace = true

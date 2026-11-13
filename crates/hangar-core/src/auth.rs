@@ -51,8 +51,20 @@ impl Credential {
     }
 }
 
-/// What a principal does to a resource.
+/// What a principal does to a resource. A match on it outside this crate
+/// needs a wildcard arm, so a later kind of access does not break callers:
+///
+/// ```compile_fail,E0004
+/// # use hangar_core::Access;
+/// # fn label(access: Access) -> &'static str {
+/// match access {
+///     Access::Read => "read",
+///     Access::Write => "write",
+/// }
+/// # }
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Access {
     /// The principal reads the resource.
     Read,
@@ -72,8 +84,20 @@ pub enum Resource {
     Record(RecordPath),
 }
 
-/// An authenticator's answer to a request for access.
+/// An authenticator's answer to a request for access. A match on it outside
+/// this crate needs a wildcard arm, so a later answer does not break callers:
+///
+/// ```compile_fail,E0004
+/// # use hangar_core::Decision;
+/// # fn allowed(decision: Decision) -> bool {
+/// match decision {
+///     Decision::Allowed => true,
+///     Decision::Denied => false,
+/// }
+/// # }
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Decision {
     /// The principal may do it.
     Allowed,

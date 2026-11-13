@@ -7,9 +7,9 @@ use crate::fixed_authenticator::FixedAuthenticator;
 use hangar_core::memory::{MemoryPageStore, MemoryRecordStore};
 use hangar_core::{
     Access, AuthError, Authenticator, Binding, BindingName, Blob, Credential, Decision, MadeFrom,
-    Page, PageName, PagePin, PageStore, PageStoreError, PageVersion, Principal, Provenance,
-    PublishedPage, ReadError, Record, RecordBody, RecordPath, RecordStore, RecordType, Resource,
-    WriteError, WriteProvenance,
+    Misfit, MoveError, Page, PageName, PagePin, PageStore, PageStoreError, PageVersion, Principal,
+    PrincipalId, Provenance, PublishedPage, ReadError, Record, RecordBody, RecordPath, RecordStore,
+    RecordType, Resource, WriteError, WriteProvenance,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -30,6 +30,30 @@ impl Authenticator for AllowsEverything {
         _resource: &Resource,
     ) -> Result<Decision, AuthError> {
         Ok(Decision::Allowed)
+    }
+}
+
+/// An authenticator that answers like the one it wraps, except that it
+/// accepts every credential and answers with the principal of `secret`.
+pub(crate) struct AcceptsEveryCredential {
+    pub(crate) inner: FixedAuthenticator,
+    pub(crate) secret: &'static str,
+}
+
+impl Authenticator for AcceptsEveryCredential {
+    async fn authenticate(&self, _credential: &Credential) -> Result<Principal, AuthError> {
+        self.inner
+            .authenticate(&Credential::bearer(self.secret))
+            .await
+    }
+
+    async fn authorize(
+        &self,
+        principal: &Principal,
+        access: Access,
+        resource: &Resource,
+    ) -> Result<Decision, AuthError> {
+        self.inner.authorize(principal, access, resource).await
     }
 }
 
@@ -78,6 +102,27 @@ pub(crate) enum Flaw {
     /// `move_binding` does not read the bound records, so a record that has
     /// vanished is not noticed.
     SkipsExistenceCheckOnMove,
+    /// `save_binding` answers `Ok` for a fill of a slot the page does not
+    /// declare. Nothing is stored.
+    SkipsUndeclaredSlotCheckOnSave,
+    /// `save_binding` answers `Ok` for a fill of a record that does not
+    /// exist. Nothing is stored. It checks the slot and the type.
+    SkipsExistenceCheckOnSave,
+    /// `move_binding` answers `Ok` for a move to a version that dropped a
+    /// filled slot. Nothing changes.
+    SkipsUndeclaredSlotCheckOnMove,
+    /// `move_binding` replaces the pin whatever version the caller expects.
+    IgnoresExpectedPin,
+    /// `move_binding` records another principal as the mover.
+    RecordsAnotherMover,
+    /// `publish` answers `v1` every time.
+    ReusesVersionNames,
+    /// `bindings_of` lists no bindings.
+    ForgetsBindingsOf,
+    /// `bindings_of` lists only the bindings pinned to the newest version.
+    ListsOnlyNewestPins,
+    /// `check_fit` answers `Ok` without reading the records.
+    ChecksNoFit,
 }
 
 /// A page store that is correct except for one flaw.
@@ -209,11 +254,31 @@ impl PageStore for FlawedPageStore {
             _ => provenance,
         };
         let version = self.inner.publish(page, provenance).await?;
+        if matches!(self.flaw, Flaw::ReusesVersionNames) {
+            return PageVersion::try_from("v1").map_err(|_| PageStoreError::Unavailable);
+        }
         if matches!(self.flaw, Flaw::MovesPinsOnRepublish) {
+            let republisher = Principal::new(
+                PrincipalId::try_from("republisher").map_err(|_| PageStoreError::Unavailable)?,
+            );
+            let based_on =
+                Blob::try_from("a".repeat(40).as_str()).map_err(|_| PageStoreError::Unavailable)?;
             for binding in self.inner.bindings_of(&name).await? {
+                let mover = WriteProvenance::new(
+                    based_on.clone(),
+                    republisher.clone(),
+                    binding.name().clone(),
+                );
                 self.inner
-                    .move_binding(binding.name(), &version, &*self.records)
-                    .await?;
+                    .move_binding(
+                        binding.name(),
+                        binding.pin().version(),
+                        &version,
+                        &*self.records,
+                        &mover,
+                    )
+                    .await
+                    .map_err(|_| PageStoreError::Unavailable)?;
             }
         }
         Ok(version)
@@ -246,6 +311,18 @@ impl PageStore for FlawedPageStore {
                 let blind = TypeBlind::for_binding(page.page(), &binding, records);
                 self.inner.save_binding(binding, &blind).await
             }
+            Flaw::SkipsUndeclaredSlotCheckOnSave => {
+                match self.inner.save_binding(binding, records).await {
+                    Err(PageStoreError::Misfit(Misfit::UndeclaredSlot { .. })) => Ok(()),
+                    other => other,
+                }
+            }
+            Flaw::SkipsExistenceCheckOnSave => {
+                match self.inner.save_binding(binding, records).await {
+                    Err(PageStoreError::Misfit(Misfit::MissingRecord { .. })) => Ok(()),
+                    other => other,
+                }
+            }
             Flaw::AcceptsUnresolvedOrigin => {
                 let rewritten = made_from_nothing(&binding)?;
                 self.inner.save_binding(rewritten, records).await
@@ -265,15 +342,39 @@ impl PageStore for FlawedPageStore {
     }
 
     async fn bindings_of(&self, name: &PageName) -> Result<Vec<Binding>, PageStoreError> {
-        self.inner.bindings_of(name).await
+        let listed = self.inner.bindings_of(name).await?;
+        match self.flaw {
+            Flaw::ForgetsBindingsOf => Ok(Vec::new()),
+            Flaw::ListsOnlyNewestPins => {
+                let newest = self.inner.latest(name).await?;
+                Ok(listed
+                    .into_iter()
+                    .filter(|binding| binding.pin().version() == newest.version())
+                    .collect())
+            }
+            _ => Ok(listed),
+        }
+    }
+
+    async fn check_fit(
+        &self,
+        name: &BindingName,
+        records: &impl RecordStore,
+    ) -> Result<(), PageStoreError> {
+        if matches!(self.flaw, Flaw::ChecksNoFit) {
+            return self.inner.binding(name).await.map(|_| ());
+        }
+        self.inner.check_fit(name, records).await
     }
 
     async fn move_binding(
         &self,
         name: &BindingName,
+        expected: &PageVersion,
         version: &PageVersion,
         records: &impl RecordStore,
-    ) -> Result<(), PageStoreError> {
+        mover: &WriteProvenance,
+    ) -> Result<(), MoveError> {
         match self.flaw {
             Flaw::SkipsTypeCheckOnMove | Flaw::SkipsExistenceCheckOnMove => {
                 let binding = self.inner.binding(name).await?;
@@ -281,13 +382,50 @@ impl PageStore for FlawedPageStore {
                 let page = self.inner.at(&target).await?;
                 if matches!(self.flaw, Flaw::SkipsTypeCheckOnMove) {
                     let blind = TypeBlind::for_binding(page.page(), &binding, records);
-                    self.inner.move_binding(name, version, &blind).await
+                    self.inner
+                        .move_binding(name, expected, version, &blind, mover)
+                        .await
                 } else {
                     let invented = Invented::for_binding(page.page(), &binding);
-                    self.inner.move_binding(name, version, &invented).await
+                    self.inner
+                        .move_binding(name, expected, version, &invented, mover)
+                        .await
                 }
             }
-            _ => self.inner.move_binding(name, version, records).await,
+            Flaw::SkipsUndeclaredSlotCheckOnMove => {
+                let moved = self
+                    .inner
+                    .move_binding(name, expected, version, records, mover)
+                    .await;
+                match moved {
+                    Err(MoveError::Refused(PageStoreError::Misfit(Misfit::UndeclaredSlot {
+                        ..
+                    }))) => Ok(()),
+                    other => other,
+                }
+            }
+            Flaw::IgnoresExpectedPin => {
+                let current = self.inner.binding(name).await?;
+                self.inner
+                    .move_binding(name, current.pin().version(), version, records, mover)
+                    .await
+            }
+            Flaw::RecordsAnotherMover => {
+                let other = Principal::new(
+                    PrincipalId::try_from("someone-else")
+                        .map_err(|_| PageStoreError::Unavailable)?,
+                );
+                let forged =
+                    WriteProvenance::new(mover.based_on().clone(), other, mover.through().clone());
+                self.inner
+                    .move_binding(name, expected, version, records, &forged)
+                    .await
+            }
+            _ => {
+                self.inner
+                    .move_binding(name, expected, version, records, mover)
+                    .await
+            }
         }
     }
 }
@@ -376,12 +514,24 @@ impl PageStore for PrefixedVersions {
         Ok(found)
     }
 
+    async fn check_fit(
+        &self,
+        name: &BindingName,
+        records: &impl RecordStore,
+    ) -> Result<(), PageStoreError> {
+        self.0.check_fit(name, records).await
+    }
+
     async fn move_binding(
         &self,
         name: &BindingName,
+        expected: &PageVersion,
         version: &PageVersion,
         records: &impl RecordStore,
-    ) -> Result<(), PageStoreError> {
-        self.0.move_binding(name, version, records).await
+        mover: &WriteProvenance,
+    ) -> Result<(), MoveError> {
+        self.0
+            .move_binding(name, expected, version, records, mover)
+            .await
     }
 }
