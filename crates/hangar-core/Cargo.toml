@@ -1,0 +1,15 @@
+[package]
+name = "hangar-core"
+description = "Types, traits and contract tests that every hangar crate shares"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+secrecy.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
