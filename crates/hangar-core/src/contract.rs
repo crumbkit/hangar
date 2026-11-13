@@ -9,12 +9,23 @@
 //! Run each function against a new store, seeded with the records that the
 //! fixture's `seeds` lists. A later crate calls every function of a suite
 //! from its own tests, on its own executor.
+//!
+//! The functions whose names start with `concurrent` take a [`RunTogether`]
+//! runner, which drives two calls so that they run at the same moment, and
+//! they await the future that it returns. Pass [`Threads`] to run each call
+//! on its own thread with [`block_on`]. A store whose futures need the
+//! context of a runtime passes a runner of its own that awaits both calls on
+//! that runtime, for example with the runtime's `join`, and runs the clause
+//! on that runtime too.
 
 use std::fmt;
 
 pub mod authenticator;
+mod executor;
 pub mod page_store;
 pub mod record_store;
+
+pub use executor::{RunTogether, Threads, block_on};
 
 /// Defines [`Clause`] with one sentence per clause.
 macro_rules! clauses {
@@ -39,7 +50,17 @@ clauses! {
     WriteReturnsANewBlobAndReplacesTheBody => "a write with the current blob returns a new blob and replaces the body",
     AStaleBlobConflictsAndChangesNothing => "a write with a stale blob conflicts and leaves the record unchanged",
     AnOldBlobConflictsAfterAWrite => "a write with the blob from before an earlier write conflicts",
+    ABlobNeverRepeatsForOneRecord => "a blob never repeats for one record, so a write that names the first blob conflicts after the body changed from A to B and back to A",
+    ARejectedWriteChangesNothing => "a rejected write leaves the record unchanged, and an unknown path answers not found and a stale blob answers conflict before a store rejects anything",
+    ConcurrentWritesFromOneBlobGiveOneConflict => "two writes from one blob that run together give one success and one conflict, and the record keeps the winner's body",
     AnUnknownPathIsNotFound => "a read or a write of an unknown path is not found",
+    VersionNamesAreNeverReused => "a page never gets the same version name twice, and an older version keeps its content",
+    ConcurrentPublishesGetTwoVersions => "two publishes that run together give two different versions, and the page lists every one",
+    ConcurrentSavesOfOneNameGiveOneNameTaken => "two saves of one binding name that run together give one success and one name taken, and the binding is the saved one",
+    ConcurrentMovesFromOnePinGiveOneMoved => "two moves from one pin that run together give one success and one moved that names the winner's version",
+    MoveBindingRefusesAStalePin => "moving a binding from a pin it does not have answers moved with the current pin and changes nothing",
+    AMoveRecordsItsMover => "a move keeps the provenance of its mover beside the provenance of the save",
+    CheckFitSeesAVanishedRecord => "checking a stored binding refuses a record that no longer exists, and changes nothing",
     PublishThenLatestReturnsThePage => "publishing a page then asking for its latest version returns the page",
     RepublishAddsAVersionNewestFirst => "a republish adds a version, versions list newest first and an older version keeps its content",
     PagesListsPublishedNames => "the page list names each published page",

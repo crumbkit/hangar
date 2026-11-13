@@ -119,9 +119,12 @@ pub async fn a_binding_round_trips<S: PageStore, R: RecordStore>(
     )?;
     unexpected(store.save_binding(saved.clone(), records).await)?;
     let read = unexpected(store.binding(&binding_name("my-view")?).await)?;
-    ensure(read == saved, Clause::ABindingRoundTrips, || {
-        format!("saved {saved:?}, read {read:?}")
-    })
+    let listed = unexpected(store.bindings_of(&page_name("home")?).await)?;
+    ensure(
+        read == saved && listed == [saved.clone()],
+        Clause::ABindingRoundTrips,
+        || format!("saved {saved:?}, read {read:?}, listed {listed:?}"),
+    )
 }
 
 /// A taken binding name and an unknown pinned version are refused with

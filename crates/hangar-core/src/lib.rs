@@ -28,5 +28,5 @@ pub use page::{
 pub use provenance::{MadeFrom, Provenance, RecordRef, WriteProvenance};
 pub use record::{Blob, MAX_RECORD_BYTES, Record, RecordBody, RecordPath, RecordType};
 pub use store::{
-    FillTypes, PageStore, PageStoreError, ReadError, RecordStore, Rejection, WriteError,
+    FillTypes, MoveError, PageStore, PageStoreError, ReadError, RecordStore, Rejection, WriteError,
 };

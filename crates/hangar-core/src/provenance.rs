@@ -97,7 +97,10 @@ impl Provenance {
 }
 
 /// Who edited a record, through which binding, and from which version of the
-/// record. A store compares `based_on` with the record's current blob.
+/// record. A record store compares `based_on` with the record's current blob.
+/// A move of a binding passes this type too, because it names the mover and
+/// the binding, and a page store does not compare its `based_on` blob with
+/// anything.
 ///
 /// The only constructor takes all three parts, so an edit without
 /// provenance does not compile:

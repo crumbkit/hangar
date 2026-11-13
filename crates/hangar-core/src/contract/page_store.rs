@@ -3,27 +3,37 @@
 //! The suite calls `save_binding` and `move_binding` with a [`RecordStore`]
 //! that the caller seeds with the fixture's records. This module holds the
 //! fixture, the helpers and the clauses about pages. The submodules hold the
-//! clauses about bindings and about moving them, and this module re-exports
-//! their functions.
+//! clauses about bindings, about moving them, about concurrent calls and about
+//! the rules that guard a move, and this module re-exports their functions.
 
 mod bindings;
+mod guards;
 mod moves;
+mod races;
 
 pub use bindings::{
     a_binding_round_trips, a_misfit_is_refused_on_save,
     a_taken_name_and_an_unknown_version_are_refused, an_unresolved_origin_is_refused,
+};
+pub use guards::{
+    a_move_records_its_mover, check_fit_sees_a_vanished_record, move_binding_refuses_a_stale_pin,
+    version_names_are_never_reused,
 };
 pub use moves::{
     a_republish_leaves_a_pin_unchanged, bindings_of_lists_a_pages_bindings,
     move_binding_changes_only_the_pin, move_binding_refuses_a_misfit,
     move_binding_refuses_a_vanished_record,
 };
+pub use races::{
+    concurrent_moves_from_one_pin_give_one_moved, concurrent_publishes_get_two_versions,
+    concurrent_saves_of_one_name_give_one_name_taken,
+};
 
 use super::{Clause, SeedRecord, Violation, ensure, fixture, seed, unexpected};
 use crate::{
-    Binding, BindingName, ContentFormat, Fills, MadeFrom, Page, PageContent, PageName, PagePin,
-    PageStore, PageStoreError, PageVersion, Principal, PrincipalId, Provenance, RecordRef,
-    RecordStore, Slot, SlotName, Slots,
+    Binding, BindingName, Blob, ContentFormat, Fills, MadeFrom, MoveError, Page, PageContent,
+    PageName, PagePin, PageStore, PageStoreError, PageVersion, Principal, PrincipalId, Provenance,
+    RecordRef, RecordStore, Slot, SlotName, Slots, WriteProvenance,
 };
 use crate::{RecordPath, RecordType};
 
@@ -77,6 +87,38 @@ impl PageFixture {
     fn original(&self) -> Result<Provenance, Violation> {
         self.provenance(MadeFrom::Original, &[])
     }
+
+    /// The provenance of a move of the binding `through`, made by the
+    /// fixture's principal.
+    fn mover(&self, through: &str) -> Result<WriteProvenance, Violation> {
+        Ok(WriteProvenance::new(
+            fixture(Blob::try_from("a".repeat(40).as_str()))?,
+            self.principal.clone(),
+            binding_name(through)?,
+        ))
+    }
+}
+
+/// Moves the binding `name` from the version `expected` to `target`, as the
+/// fixture's mover. The outer result is a fixture failure and the inner
+/// result is the store's answer.
+async fn move_to<S: PageStore, R: RecordStore>(
+    store: &S,
+    records: &R,
+    contract_fixture: &PageFixture,
+    name: &str,
+    expected: &PageVersion,
+    target: &PageVersion,
+) -> Result<Result<(), MoveError>, Violation> {
+    Ok(store
+        .move_binding(
+            &binding_name(name)?,
+            expected,
+            target,
+            records,
+            &contract_fixture.mover(name)?,
+        )
+        .await)
 }
 
 fn page_name(text: &str) -> Result<PageName, Violation> {

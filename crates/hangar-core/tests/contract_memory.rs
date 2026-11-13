@@ -2,21 +2,21 @@
 //! authenticator, so each suite is known to pass on a correct implementation.
 #![cfg(test)]
 
-#[path = "support/block_on.rs"]
-mod block_on;
 #[path = "support/fixed_authenticator.rs"]
 mod fixed_authenticator;
 
-use block_on::block_on;
 use fixed_authenticator::FixedAuthenticator;
 use hangar_core::contract::authenticator::{self, AuthFixture};
 use hangar_core::contract::page_store::{self, PageFixture};
 use hangar_core::contract::record_store::{self, RecordFixture};
+use hangar_core::contract::{RunTogether, Threads, block_on};
 use hangar_core::memory::{MemoryPageStore, MemoryRecordStore};
 use hangar_core::{
     BindingName, Credential, PageName, Principal, PrincipalId, RecordPath, RecordStore, Resource,
     WriteProvenance,
 };
+use std::future::Future;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn seeded_records(seeds: &[hangar_core::contract::SeedRecord]) -> MemoryRecordStore {
     let store = MemoryRecordStore::new();
@@ -48,7 +48,64 @@ record_suite!(
     write_returns_a_new_blob_and_replaces_the_body,
     a_stale_blob_conflicts_and_changes_nothing,
     an_old_blob_conflicts_after_a_write,
+    a_blob_never_repeats_for_one_record,
+    a_rejected_write_changes_nothing,
     an_unknown_path_is_not_found,
+);
+
+/// A runner that counts the pairs it drives, and drives them on threads.
+#[derive(Default)]
+struct CountingRunner {
+    pairs: AtomicUsize,
+}
+
+impl RunTogether for CountingRunner {
+    fn run_together<A, B, FA, FB>(
+        &self,
+        first: impl FnOnce() -> FA + Send,
+        second: impl FnOnce() -> FB + Send,
+    ) -> impl Future<Output = Option<(A, B)>> + Send
+    where
+        A: Send,
+        B: Send,
+        FA: Future<Output = A> + Send,
+        FB: Future<Output = B> + Send,
+    {
+        self.pairs.fetch_add(1, Ordering::SeqCst);
+        Threads.run_together(first, second)
+    }
+}
+
+#[test]
+fn concurrent_writes_from_one_blob_give_one_conflict() {
+    let fixture = RecordFixture::standard().unwrap();
+    let store = seeded_records(fixture.seeds());
+    let runner = CountingRunner::default();
+    block_on(
+        record_store::concurrent_writes_from_one_blob_give_one_conflict(&store, &fixture, &runner),
+    )
+    .unwrap();
+    assert!(runner.pairs.load(Ordering::SeqCst) > 1);
+}
+
+macro_rules! concurrent_page_suite {
+    ($($name:ident),* $(,)?) => {$(
+        #[test]
+        fn $name() {
+            let fixture = PageFixture::standard().unwrap();
+            let records = seeded_records(fixture.seeds());
+            let pages = MemoryPageStore::new();
+            let runner = CountingRunner::default();
+            block_on(page_store::$name(&pages, &records, &fixture, &runner)).unwrap();
+            assert!(runner.pairs.load(Ordering::SeqCst) > 1);
+        }
+    )*};
+}
+
+concurrent_page_suite!(
+    concurrent_publishes_get_two_versions,
+    concurrent_saves_of_one_name_give_one_name_taken,
+    concurrent_moves_from_one_pin_give_one_moved,
 );
 
 macro_rules! page_suite {
@@ -65,6 +122,9 @@ macro_rules! page_suite {
 
 page_suite!(
     publish_then_latest_returns_the_page,
+    version_names_are_never_reused,
+    move_binding_refuses_a_stale_pin,
+    a_move_records_its_mover,
     republish_adds_a_version_newest_first,
     pages_lists_published_names,
     unknown_names_are_not_found,
@@ -78,6 +138,21 @@ page_suite!(
     move_binding_refuses_a_misfit,
     bindings_of_lists_a_pages_bindings,
 );
+
+#[test]
+fn check_fit_sees_a_vanished_record() {
+    let fixture = PageFixture::standard().unwrap();
+    let records = seeded_records(fixture.seeds());
+    let without_records = MemoryRecordStore::new();
+    let pages = MemoryPageStore::new();
+    block_on(page_store::check_fit_sees_a_vanished_record(
+        &pages,
+        &records,
+        &without_records,
+        &fixture,
+    ))
+    .unwrap();
+}
 
 #[test]
 fn move_binding_refuses_a_vanished_record() {
@@ -138,11 +213,11 @@ fn the_memory_record_store_keeps_the_write_provenance_of_the_last_write() {
     let seed = fixture.seeds().first().unwrap();
     let path: &RecordPath = seed.path();
     let current = block_on(store.read(path)).unwrap();
-    assert_eq!(store.last_write(path), None);
+    assert_eq!(store.last_write(path), Ok(None));
 
     let provenance = write_provenance(current.blob().clone());
     block_on(store.write(path, seed.body(), &provenance)).unwrap();
-    assert_eq!(store.last_write(path), Some(provenance));
+    assert_eq!(store.last_write(path), Ok(Some(provenance)));
 }
 
 #[test]
