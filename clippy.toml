@@ -1,0 +1,35 @@
+# hangar-core reads no environment variable, starts no process and sleeps
+# nowhere, so no module owns any call listed below and each reason says what
+# to do instead. When a later crate needs one of these calls, that crate
+# names its owning module in the reason of the entry (BASE-5).
+
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-dbg-in-tests = true
+allow-print-in-tests = true
+allow-indexing-slicing-in-tests = true
+too-many-lines-threshold = 150 # BASE-10
+max-fn-params-bools = 3 # BASE-16
+
+disallowed-methods = [
+    # BASE-6
+    { path = "std::env::var", reason = "read the environment snapshot" },
+    { path = "std::env::var_os", reason = "read the environment snapshot" },
+    { path = "std::env::vars", reason = "only the entry point captures the environment" },
+    { path = "std::env::vars_os", reason = "only the entry point captures the environment" },
+    { path = "std::env::set_var", reason = "build a snapshot in the test instead" },
+    { path = "std::env::remove_var", reason = "build a snapshot in the test instead" },
+    { path = "std::env::current_dir", reason = "read the directory from the snapshot" },
+    { path = "std::env::set_current_dir", reason = "pass the directory to the operation instead" },
+    # BASE-7
+    { path = "std::process::exit", reason = "return the exit code from main so destructors run" },
+    # BASE-11
+    { path = "std::thread::sleep", reason = "wait for an observable signal, or sleep in the clock owner" },
+    { path = "tokio::time::sleep", reason = "wait for an observable signal, or sleep in the clock owner", allow-invalid = true },
+]
+
+# BASE-7: hangar's only error crate is thiserror, which has no untyped-error
+# macro, so the list is empty. A crate that adds anyhow or miette lists its
+# untyped-error macros here.
+disallowed-macros = []

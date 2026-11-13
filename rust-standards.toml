@@ -1,0 +1,29 @@
+# hangar's adoption map of the Rust standards (adoption.md of
+# https://github.com/crumbkit/rust-standards). The standards have no released
+# version yet, so the map names the draft and the commit it was reviewed
+# against.
+
+schema = "rust-standards/adoption/v1"
+standards = { version = "draft", commit = "117f4a8ad1a66ff7bceb15f9b3ebcb405507588b" }
+
+# hangar-core is a library that other hangar crates depend on. The profiles
+# child-process, service, cli and durable-state join with the crate that
+# needs each of them: child-process with hangar-board, service with
+# hangar-server, cli with the binary and durable-state with
+# hangar-auth-loopback's token file.
+profiles = ["base", "library"]
+
+[[binding]]
+rule = "BASE-24"
+owners = ["crates/hangar-core/tests/support/fixed_authenticator.rs"]
+checks = ["review: expose_secret appears only in the files listed in owners"]
+note = "hangar-core holds a credential's secret in a secrecy::SecretString inside Credential, and its source code never calls expose_secret. The test double FixedAuthenticator calls it once, to compare a presented bearer secret with the secret that the test gave it. A real Authenticator in a later crate adds its own file here."
+
+[[decision]]
+id = "lanes"
+requirement = """
+- Lane: `lane` in .github/workflows/ci.yml, on each pull request and each push to main. It runs every step of the pull-request lane in the standards' order (format, workflows, deny, shear, clippy, tests, doctests, rustdoc, features). It has no macOS job, because the workspace has no platform code. Its budget is ten minutes, the job's timeout. A merge waits for it.
+- Lane: `advisories` in .github/workflows/ci.yml, daily at 06:43 UTC and on each push to main (BASE-29). Nothing waits for it.
+"""
+purpose = "The pull-request lane stays within ten minutes on a small workspace and grows with the code. A daily advisory run catches an advisory published against a dependency already on main, and finding it after merge is safe because the advisory concerns code that is already on main."
+realizations = [".github/workflows/ci.yml"]
