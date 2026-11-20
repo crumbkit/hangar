@@ -54,7 +54,7 @@ http = "1.5.0"
 # FIFO in its place cannot block the open; tokio and mio already bring it in.
 libc = "0.2.191"
 # Verifies the RS256 signature of an OpenID Connect ID token.
-jsonwebtoken = { version = "11.1.0", default-features = false, features = ["aws_lc_rs"] }
+jsonwebtoken = { version = "12.0.0", default-features = false, features = ["aws_lc_rs"] }
 # Renders the Mustache templates of HTML pages in hangar-render. Its optional
 # serde feature stays off, because hangar-render builds the template data
 # from serde_json values itself.
